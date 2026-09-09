@@ -1,0 +1,7 @@
+<resources>
+    <string name="app_name">JMComic 本地书库</string>
+    <string name="download_channel_name">下载任务</string>
+    <string name="download_channel_description">显示正在进行的作品下载与 PDF 生成进度</string>
+    <string name="export_channel_name">PDF 导出任务</string>
+    <string name="export_channel_description">显示 PDF 正在保存到所选位置的进度</string>
+</resources>

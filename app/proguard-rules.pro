@@ -1,0 +1,4 @@
+-keep class com.nuancun.jmcomic.mobile.data.** { *; }
+-dontwarn org.bouncycastle.**
+-dontwarn org.apache.pdfbox.**
+-dontwarn com.gemalto.jp2.**
