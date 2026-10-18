@@ -28,29 +28,58 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.withContext
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
+import java.util.concurrent.atomic.AtomicInteger
 import java.io.File
 import java.io.FileOutputStream
-import java.security.MessageDigest
-import kotlin.coroutines.coroutineContext
+import kotlinx.coroutines.currentCoroutineContext
 
 class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     private val dao = AppDatabase.get(context).libraryDao()
 
     override suspend fun doWork(): Result = withContext(Dispatchers.IO) {
         val albumId = inputData.getString(KEY_ALBUM_ID) ?: return@withContext Result.failure()
+        DownloadRuntime.withAlbum(albumId) {
+            currentCoroutineContext().ensureActive()
+            download(albumId)
+        }
+    }
+
+    private suspend fun download(albumId: String): Result {
         val taskId = id.toString()
         val now = System.currentTimeMillis()
         var completedImages = 0
         var totalImages = 0
-        if (dao.isPendingDeletion(albumId) == true) return@withContext Result.failure()
+        if (dao.isPendingDeletion(albumId) == true) return Result.failure()
         dao.upsertTask(DownloadTaskEntity(taskId, albumId, "JM$albumId", DownloadState.QUEUED, 0, 0, "等待开始", now, now))
         setForeground(createForeground("正在读取作品信息", 0, 0))
         try {
+            val existing = dao.album(albumId)
+            val savedChapters = dao.chapters(albumId)
+            val albumDir = safeAlbumDir(albumId)
+            val context = currentCoroutineContext()
+            // A failed/cancelled final assembly must not depend on the metadata service again.
+            if (existing != null && (existing.status != DownloadState.COMPLETE ||
+                    existing.pdfPath?.let { File(it).isFile } != true)) {
+                val localInputs = try {
+                    CompletedChapterFiles.restore(existing, savedChapters, albumDir,
+                        dao::pages, ::isValidImage) { context.ensureActive() }
+                } catch (_: java.io.IOException) { null }
+                if (localInputs != null) {
+                    completedImages = localInputs.sumOf { it.images.size }
+                    totalImages = completedImages
+                    buildAndPublishPdf(albumId, taskId, existing.title, savedChapters, localInputs, completedImages, totalImages)
+                    return Result.success()
+                }
+            }
             val api = JmApiClient()
             update(taskId, DownloadState.FETCHING, 0, 0, "读取作品和章节")
             val remoteAlbum = api.album(albumId)
-            val existing = dao.album(albumId)
-            val existingChapters = dao.chapters(albumId).associateBy { it.chapterId }
+            val existingChapters = savedChapters.associateBy { it.chapterId }
             val chapters = remoteAlbum.chapters.map { remote ->
                 val saved = existingChapters[remote.id]
                 ChapterEntity(
@@ -81,104 +110,169 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
                     pendingDeletion = false,
                     addedAt = existing?.addedAt ?: now,
                     updatedAt = now,
+                    lastReadChapterId = existing?.lastReadChapterId,
+                    lastReadChapterPage = existing?.lastReadChapterPage ?: 0,
                 ),
                 chapters,
             )
             dao.upsertTask(DownloadTaskEntity(taskId, albumId, remoteAlbum.title, DownloadState.FETCHING, 0, 0, "准备目录", now, System.currentTimeMillis()))
 
-            val chapterPhotos = mutableListOf<Pair<ChapterEntity, RemotePhoto>>()
-            for ((chapterPosition, chapter) in chapters.withIndex()) {
-                coroutineContext.ensureActive()
-                check(dao.isPendingDeletion(albumId) != true) { "作品正在删除" }
-                if (isStopped) return@withContext cancelled(taskId, completedImages, totalImages)
-                update(taskId, DownloadState.FETCHING, 0, 0, "读取第 ${chapterPosition + 1}/${chapters.size} 章")
-                val photo = api.photo(chapter.chapterId)
-                chapterPhotos += chapter to photo
-                totalImages += photo.imageNames.size
-            }
-            update(taskId, DownloadState.DOWNLOADING, 0, totalImages, "准备下载 $totalImages 张")
-
-            val albumDir = safeAlbumDir(albumId)
             val pdfInputs = mutableListOf<ChapterPdfInput>()
-            for ((chapterPosition, pair) in chapterPhotos.withIndex()) {
-                val (chapter, photo) = pair
-                coroutineContext.ensureActive()
-                check(dao.isPendingDeletion(albumId) != true) { "作品正在删除" }
-                if (isStopped) return@withContext cancelled(taskId, completedImages, totalImages)
-                val imageDir = File(albumDir, "chapters/${photo.id}/images").apply { mkdirs() }
-                val imageFiles = mutableListOf<File>()
-                photo.imageNames.forEachIndexed { index, remoteName ->
-                    coroutineContext.ensureActive()
-                    check(dao.isPendingDeletion(albumId) != true) { "作品正在删除" }
-                    if (isStopped) return@withContext cancelled(taskId, completedImages, totalImages)
-                    val output = File(imageDir, "%06d.jpg".format(index + 1))
-                    val pageKey = "${photo.id}:${index + 1}"
-                    if (!isValidImage(output)) {
-                        update(taskId, DownloadState.DOWNLOADING, completedImages, totalImages, "${chapter.title} · ${index + 1}/${photo.imageNames.size}")
-                        setForeground(createForeground("${remoteAlbum.title} · ${index + 1}/${photo.imageNames.size}", completedImages, totalImages))
-                        val bytes = api.downloadImage(photo.id, remoteName)
-                        val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
-                        BitmapFactory.decodeByteArray(bytes, 0, bytes.size, bounds)
-                        val pixels = bounds.outWidth.toLong() * bounds.outHeight.toLong()
-                        require(bounds.outWidth > 0 && bounds.outHeight > 0 && pixels <= MAX_PIXELS) { "图片尺寸无效或超过限制" }
-                        val source = BitmapFactory.decodeByteArray(
-                            bytes,
-                            0,
-                            bytes.size,
-                            BitmapFactory.Options().apply { inPreferredConfig = android.graphics.Bitmap.Config.RGB_565 },
-                        ) ?: error("图片无法解码")
-                        val decoded = try {
-                            val segments = ImageScrambler.segmentationCount(photo.scrambleId, photo.id, remoteName.substringBeforeLast('.'))
-                            ImageScrambler.decode(source, segments)
-                        } finally {
-                            source.recycle()
+            val discoveredImages = AtomicInteger()
+            val progress = Mutex()
+            coroutineScope {
+                // Bounded look-ahead: the first chapter starts without waiting for the entire book.
+                val photos = Channel<Pair<ChapterEntity, RemotePhoto>>(1)
+                val metadata = launch {
+                    try {
+                        for ((chapterPosition, chapter) in chapters.withIndex()) {
+                            ensureWritable(albumId)
+                            if (chapterPosition == 0) update(taskId, DownloadState.FETCHING, 0, 0, "读取第 ${chapterPosition + 1}/${chapters.size} 章")
+                            val photo = api.photo(chapter.chapterId)
+                            require(photo.id == chapter.chapterId && photo.imageNames.isNotEmpty()) { "章节图片不完整" }
+                            dao.updateChapterTotal(chapter.chapterId, photo.imageNames.size)
+                            discoveredImages.addAndGet(photo.imageNames.size)
+                            photos.send(chapter to photo)
                         }
-                        val part = File(imageDir, "${output.name}.part")
-                        try {
-                            FileOutputStream(part).use { stream ->
-                                require(decoded.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, stream)) { "图片保存失败" }
-                                stream.fd.sync()
-                            }
-                            if (output.exists()) output.delete()
-                            require(part.renameTo(output)) { "图片提交失败" }
-                        } finally {
-                            decoded.recycle()
-                            if (part.exists()) part.delete()
-                        }
+                        photos.close()
+                    } catch (error: CancellationException) {
+                        photos.cancel(error)
+                        throw error
+                    } catch (error: Exception) {
+                        // Finish the already supplied chapters before reporting a later metadata failure.
+                        photos.close(error)
                     }
-                    completedImages++
-                    dao.upsertPage(PageEntity(pageKey, photo.id, index + 1, remoteName, output.absolutePath, sha256(output), output.length(), "COMPLETE"))
-                    dao.updateChapter(photo.id, "DOWNLOADING", index + 1, photo.imageNames.size, null)
-                    imageFiles += output
-                    update(taskId, DownloadState.DOWNLOADING, completedImages, totalImages, "已完成 $completedImages/$totalImages 张")
                 }
-                dao.updateChapter(photo.id, "COMPLETE", imageFiles.size, imageFiles.size, null)
-                pdfInputs += ChapterPdfInput(photo.id, chapter.title, imageFiles)
-                dao.updateAlbum(albumId, DownloadState.DOWNLOADING, chapterPosition + 1, chapters.size, existing?.pdfPath, System.currentTimeMillis())
+                try {
+                    for ((chapter, photo) in photos) {
+                        ensureWritable(albumId)
+                        totalImages = discoveredImages.get()
+                        update(taskId, DownloadState.DOWNLOADING, completedImages, totalImages, "准备下载 $totalImages 张")
+                        val imageDir = File(albumDir, "chapters/${photo.id}/images").apply { mkdirs() }
+                        val imageFiles = photo.imageNames.indices.map { File(imageDir, "%06d.jpg".format(it + 1)) }
+                        val savedPages = dao.pages(photo.id).associateBy { it.pageIndex }
+                        dao.trimPages(photo.id, imageFiles.size)
+                        var chapterCompleted = 0
+                        val failures = downloadChapterPages(imageFiles.size) { index ->
+                            ensureWritable(albumId)
+                            val output = imageFiles[index]
+                            val remoteName = photo.imageNames[index]
+                            val saved = savedPages[index + 1]
+                            if (!isValidImage(output) || saved != null &&
+                                (saved.remoteName != remoteName || saved.sha256 != null && saved.sha256 != sha256(output))) {
+                                downloadPage(api, photo, remoteName, output, albumId)
+                            }
+                            val page = PageEntity("${photo.id}:${index + 1}", photo.id, index + 1,
+                                remoteName, output.absolutePath, sha256(output), output.length(), "COMPLETE")
+                            progress.withLock {
+                                ensureWritable(albumId)
+                                dao.upsertPage(page)
+                                chapterCompleted++
+                                completedImages++
+                                totalImages = discoveredImages.get()
+                                // A previously complete chapter remains readable while being revalidated.
+                                val state = if (chapter.status == DownloadState.COMPLETE &&
+                                    chapter.pageCount == imageFiles.size) DownloadState.COMPLETE else DownloadState.DOWNLOADING
+                                dao.updateChapter(photo.id, state, chapterCompleted, imageFiles.size, chapter.pdfStartPage)
+                                update(taskId, DownloadState.DOWNLOADING, completedImages, totalImages, "已完成 $completedImages/$totalImages 张")
+                                val time = System.currentTimeMillis()
+                                if (time - lastNotification >= 750) {
+                                    setForeground(createForeground("${remoteAlbum.title} · ${index + 1}/${photo.imageNames.size}", completedImages, totalImages))
+                                    lastNotification = time
+                                }
+                            }
+                        }
+                        if (failures.isNotEmpty()) {
+                            dao.updateChapter(photo.id, DownloadState.FAILED, chapterCompleted, imageFiles.size, chapter.pdfStartPage)
+                            throw failures.first()
+                        }
+                        ensureWritable(albumId)
+                        dao.updateChapter(photo.id, "COMPLETE", imageFiles.size, imageFiles.size, chapter.pdfStartPage)
+                        pdfInputs += ChapterPdfInput(photo.id, chapter.title, imageFiles)
+                        val completedChapters = dao.chapters(albumId).count { it.status == DownloadState.COMPLETE }
+                        dao.updateAlbum(albumId, DownloadState.DOWNLOADING, completedChapters, chapters.size, existing?.pdfPath, System.currentTimeMillis())
+                    }
+                } finally { metadata.cancel(); photos.cancel() }
             }
 
-            update(taskId, DownloadState.BUILDING_PDF, completedImages, totalImages, "正在生成带章节目录的 PDF")
-            setForeground(createForeground("正在生成 PDF", completedImages, totalImages))
-            val pdfFile = File(albumDir, "pdf/book.pdf")
-            val result = PdfBookBuilder.build(remoteAlbum.title, pdfInputs, pdfFile)
-            chapters.forEach { chapter ->
-                val pages = dao.pages(chapter.chapterId)
-                dao.updateChapter(chapter.chapterId, "COMPLETE", pages.size, pages.size, result.chapterStartPages[chapter.chapterId])
-            }
-            dao.updateAlbum(albumId, DownloadState.COMPLETE, chapters.size, chapters.size, pdfFile.absolutePath, System.currentTimeMillis())
-            update(taskId, DownloadState.COMPLETE, completedImages, totalImages, "下载完成，共 ${result.pageCount} 页")
-            Result.success()
+            buildAndPublishPdf(albumId, taskId, remoteAlbum.title, chapters, pdfInputs, completedImages, totalImages)
+            return Result.success()
         } catch (error: CancellationException) {
             withContext(NonCancellable) { cancelled(taskId, completedImages, totalImages) }
-        } catch (error: Throwable) {
-            if (isStopped) return@withContext cancelled(taskId, completedImages, totalImages)
+            throw error
+        } catch (error: Exception) {
+            if (isStopped) return cancelled(taskId, completedImages, totalImages)
             val message = error.message?.take(180) ?: error::class.java.simpleName
             update(taskId, DownloadState.FAILED, completedImages, totalImages, message)
             val savedChapters = dao.chapters(albumId)
             val completedChapters = savedChapters.count { it.status == "COMPLETE" }
             dao.updateAlbum(albumId, DownloadState.FAILED, completedChapters, savedChapters.size, dao.album(albumId)?.pdfPath, System.currentTimeMillis())
-            Result.failure()
+            return Result.failure()
         }
+    }
+
+    private var lastNotification = 0L
+
+    private suspend fun buildAndPublishPdf(
+        albumId: String, taskId: String, title: String, chapters: List<ChapterEntity>,
+        inputs: List<ChapterPdfInput>, completedImages: Int, totalImages: Int,
+    ) {
+        ensureWritable(albumId)
+        dao.task(taskId)?.let { dao.upsertTask(it.copy(title = title)) }
+        update(taskId, DownloadState.BUILDING_PDF, completedImages, totalImages, "正在生成带章节目录的 PDF")
+        setForeground(createForeground("正在生成 PDF", completedImages, totalImages))
+        val pdfFile = File(safeAlbumDir(albumId), "pdf/book.pdf")
+        val result = DownloadRuntime.buildPdf {
+            val context = currentCoroutineContext()
+            try { PdfBookBuilder.build(title, inputs, pdfFile) { context.ensureActive() } }
+            catch (error: OutOfMemoryError) { throw java.io.IOException(error) }
+        }
+        ensureWritable(albumId)
+        val counts = inputs.associate { it.chapterId to it.images.size }
+        for (chapter in chapters) {
+            val count = checkNotNull(counts[chapter.chapterId])
+            dao.updateChapter(chapter.chapterId, "COMPLETE", count, count, result.chapterStartPages[chapter.chapterId])
+        }
+        dao.updateAlbum(albumId, DownloadState.COMPLETE, chapters.size, chapters.size, pdfFile.absolutePath, System.currentTimeMillis())
+        update(taskId, DownloadState.COMPLETE, completedImages, totalImages, "下载完成，共 ${result.pageCount} 页")
+    }
+
+    private suspend fun ensureWritable(albumId: String) {
+        currentCoroutineContext().ensureActive()
+        check(dao.isPendingDeletion(albumId) != true) { "作品正在删除" }
+        if (isStopped) throw CancellationException()
+    }
+
+    private suspend fun downloadPage(api: JmApiClient, photo: RemotePhoto, remoteName: String, output: File, albumId: String) {
+        val raw = File(output.parentFile, "${output.name}.download")
+        val part = File(output.parentFile, "${output.name}.part")
+        try {
+            DownloadRuntime.network.transfer({ it }, albumId) { api.downloadImage(photo.id, remoteName, raw) }
+            DownloadRuntime.processImage {
+                ensureWritable(albumId)
+                val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+                BitmapFactory.decodeFile(raw.absolutePath, bounds)
+                val pixels = bounds.outWidth.toLong() * bounds.outHeight.toLong()
+                require(bounds.outWidth > 0 && bounds.outHeight > 0 && pixels <= MAX_PIXELS) { "图片尺寸无效或超过限制" }
+                val source = BitmapFactory.decodeFile(raw.absolutePath,
+                    BitmapFactory.Options().apply { inPreferredConfig = android.graphics.Bitmap.Config.RGB_565 })
+                    ?: error("图片无法解码")
+                val decoded = try {
+                    val segments = ImageScrambler.segmentationCount(photo.scrambleId, photo.id, remoteName.substringBeforeLast('.'))
+                    ImageScrambler.decode(source, segments)
+                } finally { source.recycle() }
+                try {
+                    FileOutputStream(part).use { stream ->
+                        require(decoded.compress(android.graphics.Bitmap.CompressFormat.JPEG, 92, stream)) { "图片保存失败" }
+                        stream.fd.sync()
+                    }
+                    ensureWritable(albumId)
+                    try {
+                        java.nio.file.Files.move(part.toPath(), output.toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING)
+                    } catch (error: java.io.IOException) { throw java.io.IOException("图片提交失败", error) }
+                } finally { decoded.recycle() }
+            }
+        } finally { raw.delete(); part.delete() }
     }
 
     private suspend fun update(taskId: String, state: String, completed: Int, total: Int, message: String) {
@@ -213,16 +307,7 @@ class DownloadWorker(context: Context, params: WorkerParameters) : CoroutineWork
     }
 
     private fun sha256(file: File): String {
-        val digest = MessageDigest.getInstance("SHA-256")
-        file.inputStream().use { input ->
-            val buffer = ByteArray(64 * 1024)
-            while (true) {
-                val count = input.read(buffer)
-                if (count < 0) break
-                digest.update(buffer, 0, count)
-            }
-        }
-        return digest.digest().joinToString("") { "%02x".format(it) }
+        return CompletedChapterFiles.sha256(file)
     }
 
     private fun createForeground(message: String, completed: Int, total: Int): ForegroundInfo {

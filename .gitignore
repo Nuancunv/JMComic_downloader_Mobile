@@ -14,10 +14,13 @@ app/release/
 /dist/
 /tmp/
 /tools/
-/Plan.md
-/EnhancementPlan-*.md
-/Verification.md
+# Local planning and historical verification documents (not published).
+/docs/local/
+# Machine-local task handoff (absolute workspace paths).
+/HANDOFF.md
 /signing.properties
 *.p12
 *.pem
 *.key
+# Recoverable local workspace cleanup; never publish.
+/TRASH/

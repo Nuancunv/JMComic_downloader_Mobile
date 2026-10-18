@@ -5,13 +5,13 @@ import androidx.compose.animation.core.spring
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectHorizontalDragGestures
-import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.offset
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -19,6 +19,7 @@ import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Unarchive
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -49,22 +50,21 @@ data class SwipeAction(
     val onClick: () -> Unit,
 )
 
-val ArchiveActionColors = Color(0xFFDCEBFA) to Color(0xFF285A86)
-val DeleteActionColors = Color(0xFFF9DEDE) to Color(0xFF8C3535)
-
+@Composable
 fun archiveAction(archived: Boolean, onClick: () -> Unit) = SwipeAction(
     label = if (archived) "取消归档" else "归档",
     icon = if (archived) Icons.Default.Unarchive else Icons.Default.Archive,
-    background = ArchiveActionColors.first,
-    foreground = ArchiveActionColors.second,
+    background = MaterialTheme.colorScheme.primaryContainer,
+    foreground = MaterialTheme.colorScheme.onPrimaryContainer,
     onClick = onClick,
 )
 
+@Composable
 fun deleteAction(label: String = "删除", onClick: () -> Unit) = SwipeAction(
     label = label,
     icon = Icons.Default.Delete,
-    background = DeleteActionColors.first,
-    foreground = DeleteActionColors.second,
+    background = MaterialTheme.colorScheme.errorContainer,
+    foreground = MaterialTheme.colorScheme.onErrorContainer,
     onClick = onClick,
 )
 
@@ -92,7 +92,7 @@ fun SwipeActionRow(
     Box(
         Modifier
             .fillMaxWidth()
-            .clip(RoundedCornerShape(14.dp))
+            .clip(RoundedCornerShape(18.dp))
             .semantics {
                 customActions = actions.map { action ->
                     CustomAccessibilityAction(action.label) { action.onClick(); true }

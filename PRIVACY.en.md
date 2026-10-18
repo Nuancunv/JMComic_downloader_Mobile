@@ -2,7 +2,7 @@
 
 [简体中文](PRIVACY.md)
 
-Effective for version 1.2.0; updated 2026-09-09.
+Effective for version 1.3.0; updated 2026-10-18.
 
 JMComic Downloader Mobile has no account system and includes no advertising, analytics, crash-reporting, or third-party push SDK. It does not collect or upload device identifiers, contacts, messages, location, photos, microphone data, or camera data.
 

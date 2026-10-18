@@ -13,13 +13,13 @@ data class ReaderSettings(
 )
 
 enum class ReaderBackground(val label: String, val argb: Long) {
-    WHITE("纯白", 0xFFFFFFFF),
-    LIGHT_GRAY("浅灰", 0xFFF2F3F5),
+    WHITE("象牙", 0xFFFAF7EF),
+    LIGHT_GRAY("暖纸", 0xFFF0EEE6),
     CREAM("米白", 0xFFFAF5E9),
-    PALE_GREEN("浅绿", 0xFFEAF3E8),
-    MIST_BLUE("雾蓝", 0xFFEAF1F8),
-    PALE_PURPLE("淡紫", 0xFFF1ECF7),
-    BLACK("纯黑", 0xFF000000),
+    PALE_GREEN("鼠尾草", 0xFFE6E9DC),
+    MIST_BLUE("亚麻", 0xFFEAE1D0),
+    PALE_PURPLE("暖砂", 0xFFE9D8C7),
+    BLACK("墨纸", 0xFF141413),
 }
 
 class ReaderPreferences(context: Context) {

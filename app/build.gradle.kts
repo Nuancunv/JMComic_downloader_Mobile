@@ -15,6 +15,9 @@ val hasReleaseSigning = listOf(
     releaseKeyAlias,
     releaseKeyPassword,
 ).all { !it.isNullOrBlank() }
+val searchPreview = providers.gradleProperty("searchPreview").map(String::toBoolean).orElse(false)
+val uiUpgrade = providers.gradleProperty("uiUpgrade").map(String::toBoolean).orElse(false)
+val uiDevelopment = providers.gradleProperty("uiDevelopment").map(String::toBoolean).orElse(false)
 
 android {
     namespace = "com.nuancun.jmcomic.mobile"
@@ -24,8 +27,8 @@ android {
         applicationId = "com.nuancun.jmcomic.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 5
-        versionName = "1.2.0"
+        versionCode = if (uiDevelopment.get()) 11 else 16
+        versionName = if (uiDevelopment.get()) "1.3.1" else "1.3.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -43,11 +46,24 @@ android {
     }
 
     buildTypes {
+        debug {
+            if (searchPreview.get() || uiUpgrade.get()) {
+                applicationIdSuffix = ".searchtest"
+                if (!uiUpgrade.get()) {
+                    versionNameSuffix = "-searchtest"
+                    resValue("string", "app_name", "JMComic 搜索测试")
+                }
+            }
+        }
         release {
             isMinifyEnabled = true
             isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
-            if (hasReleaseSigning) {
+            if (uiUpgrade.get()) {
+                // Optimized local delivery upgrades the accepted search-test package with its existing signer.
+                applicationIdSuffix = ".searchtest"
+                signingConfig = signingConfigs.getByName("debug")
+            } else if (hasReleaseSigning) {
                 signingConfig = signingConfigs.getByName("release")
             }
         }
@@ -88,6 +104,7 @@ dependencies {
     }
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.json:json:20240303")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
     androidTestImplementation(platform("androidx.compose:compose-bom:2025.05.01"))

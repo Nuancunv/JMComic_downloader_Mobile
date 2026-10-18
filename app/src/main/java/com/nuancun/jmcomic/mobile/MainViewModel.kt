@@ -15,40 +15,55 @@ import com.nuancun.jmcomic.mobile.data.DownloadState
 import com.nuancun.jmcomic.mobile.data.DownloadTaskEntity
 import com.nuancun.jmcomic.mobile.data.ExportState
 import com.nuancun.jmcomic.mobile.data.ExportTaskEntity
+import com.nuancun.jmcomic.mobile.data.LibrarySearchHit
+import com.nuancun.jmcomic.mobile.data.LocalSearchRepository
+import com.nuancun.jmcomic.mobile.data.SearchableAlbum
 import com.nuancun.jmcomic.mobile.source.JmApiClient
 import com.nuancun.jmcomic.mobile.source.SearchHit
-import com.nuancun.jmcomic.mobile.source.SearchRanker
+import com.nuancun.jmcomic.mobile.source.MatchKind
+import com.nuancun.jmcomic.mobile.source.QueryAnalyzer
+import com.nuancun.jmcomic.mobile.source.RemoteSearchSession
+import com.nuancun.jmcomic.mobile.source.SearchQuery
 import com.nuancun.jmcomic.mobile.work.DownloadScheduler
 import com.nuancun.jmcomic.mobile.work.ExportScheduler
+import com.nuancun.jmcomic.mobile.work.DownloadRuntime
+import com.nuancun.jmcomic.mobile.reader.ReadingIndex
+import com.nuancun.jmcomic.mobile.reader.ReadingPosition
 import java.io.File
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class, kotlinx.coroutines.FlowPreview::class)
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val dao = AppDatabase.get(application).libraryDao()
     private val api = JmApiClient()
     private var searchGeneration = 0
-    private var activeSearchQuery = ""
-    private var activeSearchPage = 0
+    private var activeSearchSession: RemoteSearchSession? = null
+    private var searchJob: Job? = null
+    private val localSearch = LocalSearchRepository(dao::observeSearchableAlbums)
 
     val albums: StateFlow<List<AlbumEntity>> = dao.observeAlbums()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val localQuery = MutableStateFlow("")
     val archiveQuery = MutableStateFlow("")
-    val libraryAlbums: StateFlow<List<AlbumEntity>> = localQuery
-        .flatMapLatest { dao.observeAlbumsMatching(it.trim(), false) }
+    val libraryAlbums: StateFlow<List<LibrarySearchHit>> = localSearch.observe(localQuery, false)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
-    val archivedAlbums: StateFlow<List<AlbumEntity>> = archiveQuery
-        .flatMapLatest { dao.observeAlbumsMatching(it.trim(), true) }
+    val archivedAlbums: StateFlow<List<LibrarySearchHit>> = localSearch.observe(archiveQuery, true)
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val archivedCount: StateFlow<Int> = dao.observeArchivedCount()
         .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), 0)
@@ -64,10 +79,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     val searchResults = MutableStateFlow<List<SearchHit>>(emptyList())
     val searchInput = MutableStateFlow("")
+    val searchQuery = MutableStateFlow<SearchQuery?>(null)
+    val searchSuggestions: StateFlow<List<String>> = combine(searchInput.debounce(180), albums) { input, entries ->
+        val analyzed = QueryAnalyzer.analyze(input)
+        if (analyzed.isEmpty || analyzed.id != null) emptyList()
+        else LocalSearchRepository.search(input, entries.map { SearchableAlbum(it, emptyList()) })
+            .filter { it.match.kind >= MatchKind.TITLE_SIMILAR }.map { it.album.title }.distinct().take(5)
+    }.flowOn(Dispatchers.Default).stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
     val searchBusy = MutableStateFlow(false)
     val searchCanLoadMore = MutableStateFlow(false)
     val searchError = MutableStateFlow<String?>(null)
     val operationMessage = MutableStateFlow<String?>(null)
+
+    fun observeAlbum(albumId: String) = dao.observeAlbum(albumId).distinctUntilChanged()
+    fun observeAlbumChapters(albumId: String) = dao.observeChapters(albumId).distinctUntilChanged()
+    fun readingAlbum(albumId: String): AutoCloseable = DownloadRuntime.reading(albumId)
+    fun observeReadingIndex(albumId: String) = dao.observeChapters(albumId)
+        .map { chapters -> chapters.map { it.copy(completedPages = 0) } }
+        .distinctUntilChanged()
+        .map { chapters ->
+            val pages = chapters.filter { it.status == DownloadState.COMPLETE }.flatMap { dao.pages(it.chapterId) }
+                .filter { page -> page.localPath?.let { File(it).let { file -> file.isFile && file.length() > 0 } } == true }
+            ReadingIndex(chapters, pages)
+        }.distinctUntilChanged { old, new -> old.entries == new.entries }.flowOn(Dispatchers.IO)
 
     init {
         viewModelScope.launch(Dispatchers.IO) {
@@ -87,38 +121,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun search(query: String) {
-        val normalized = normalizeSearchQuery(query)
-        if (normalized.isEmpty()) return
         val generation = ++searchGeneration
-        activeSearchQuery = normalized
-        activeSearchPage = 1
+        searchJob?.cancel()
+        activeSearchSession = null
+        searchQuery.value = null
         searchResults.value = emptyList()
         searchCanLoadMore.value = false
-        executeSearch(normalized, 1, generation, append = false)
+        searchError.value = null
+        if (query.isBlank()) {
+            searchBusy.value = false
+            return
+        }
+        executeSearch(generation, input = query)
     }
 
     fun loadMoreSearchResults() {
-        if (searchBusy.value || !searchCanLoadMore.value || activeSearchQuery.isBlank()) return
-        val generation = searchGeneration
-        executeSearch(activeSearchQuery, activeSearchPage + 1, generation, append = true)
+        if (searchBusy.value || !searchCanLoadMore.value) return
+        val session = activeSearchSession ?: return
+        executeSearch(searchGeneration, session)
     }
 
-    private fun executeSearch(query: String, page: Int, generation: Int, append: Boolean) {
-        viewModelScope.launch {
-            searchBusy.value = true
-            searchError.value = null
-            runCatching { withContext(Dispatchers.IO) { api.search(query, page) } }
-                .onSuccess { incoming ->
-                    if (generation != searchGeneration) return@onSuccess
-                    val merged = if (append) (searchResults.value + incoming).distinctBy { it.id } else incoming
-                    searchResults.value = SearchRanker.rank(query, merged)
-                    activeSearchPage = page
-                    searchCanLoadMore.value = incoming.isNotEmpty()
-                }
-                .onFailure { error ->
-                    if (generation == searchGeneration) searchError.value = error.message ?: "检索失败"
-                }
-            if (generation == searchGeneration) searchBusy.value = false
+    private fun executeSearch(generation: Int, existing: RemoteSearchSession? = null, input: String = "") {
+        searchBusy.value = true
+        searchError.value = null
+        searchJob = viewModelScope.launch {
+            try {
+                val session = existing ?: withContext(Dispatchers.Default) { RemoteSearchSession(input, api) }
+                if (generation != searchGeneration) return@launch
+                activeSearchSession = session
+                searchQuery.value = session.query
+                val batch = withContext(Dispatchers.Default) { session.loadNext() }
+                if (generation != searchGeneration) return@launch
+                searchResults.value = batch.hits
+                searchCanLoadMore.value = batch.hasMore
+                searchError.value = batch.notice
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: Exception) {
+                if (generation == searchGeneration) searchError.value = "检索失败，请重试"
+            } finally {
+                if (generation == searchGeneration) searchBusy.value = false
+            }
         }
     }
 
@@ -211,6 +254,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private suspend fun finishAlbumDeletion(albumId: String) {
+        DownloadRuntime.withAlbum(albumId) { deleteAlbumFiles(albumId) }
+    }
+
+    private suspend fun deleteAlbumFiles(albumId: String) {
         require(albumId.matches(Regex("^[0-9]{1,12}$"))) { "作品 ID 无效" }
         val root = File(getApplication<Application>().filesDir, "albums").canonicalFile
         val target = File(root, "jm/$albumId").canonicalFile
@@ -269,14 +316,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun consumeOperationMessage() {
-        operationMessage.value = null
+    fun updateReadPosition(albumId: String, position: ReadingPosition, offset: Int = 0) {
+        viewModelScope.launch(Dispatchers.IO) {
+            dao.updateReadPosition(albumId, position.page, offset, position.chapterId, position.chapterPage, System.currentTimeMillis())
+        }
     }
 
-    private fun normalizeSearchQuery(input: String): String {
-        val trimmed = input.trim()
-        if (trimmed.matches(Regex("(?i)^(?:JM)?\\d{1,12}$"))) return trimmed.replace(Regex("(?i)^JM"), "")
-        return Regex("(?i)/(?:album|photo)/(\\d{1,12})").find(trimmed)?.groupValues?.get(1) ?: trimmed
+    fun consumeOperationMessage() {
+        operationMessage.value = null
     }
 
     private fun destinationLabel(uri: Uri, savedName: String): String {

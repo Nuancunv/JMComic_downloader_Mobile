@@ -1,9 +1,11 @@
 <resources>
     <style name="Theme.JMComicMobile" parent="android:style/Theme.Material.Light.NoActionBar">
         <item name="android:fontFamily">sans</item>
+        <item name="android:colorAccent">#D97757</item>
         <item name="android:windowLightStatusBar">true</item>
+        <item name="android:windowBackground">#F0EEE6</item>
         <item name="android:statusBarColor">@android:color/transparent</item>
-        <item name="android:navigationBarColor">@android:color/white</item>
+        <item name="android:navigationBarColor">@android:color/transparent</item>
         <item name="android:windowActionModeOverlay">true</item>
     </style>
 </resources>

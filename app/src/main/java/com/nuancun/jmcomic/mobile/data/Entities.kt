@@ -23,6 +23,8 @@ data class AlbumEntity(
     @ColumnInfo(defaultValue = "0") val pendingDeletion: Boolean = false,
     val addedAt: Long,
     val updatedAt: Long,
+    @ColumnInfo(defaultValue = "NULL") val lastReadChapterId: String? = null,
+    @ColumnInfo(defaultValue = "0") val lastReadChapterPage: Int = 0,
 )
 
 @Entity(

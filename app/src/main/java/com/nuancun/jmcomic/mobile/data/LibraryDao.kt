@@ -11,19 +11,12 @@ interface LibraryDao {
     @Query("SELECT * FROM albums WHERE pendingDeletion = 0 ORDER BY updatedAt DESC")
     fun observeAlbums(): Flow<List<AlbumEntity>>
 
-    @Query("""
-        SELECT DISTINCT albums.* FROM albums
-        LEFT JOIN chapters ON chapters.albumId = albums.albumId
-        WHERE albums.archived = :archived AND albums.pendingDeletion = 0
-          AND (:query = ''
-           OR albums.albumId LIKE '%' || :query || '%' COLLATE NOCASE
-           OR albums.title LIKE '%' || :query || '%' COLLATE NOCASE
-           OR albums.author LIKE '%' || :query || '%' COLLATE NOCASE
-           OR albums.tags LIKE '%' || :query || '%' COLLATE NOCASE
-           OR chapters.title LIKE '%' || :query || '%' COLLATE NOCASE)
-        ORDER BY albums.updatedAt DESC
-    """)
-    fun observeAlbumsMatching(query: String, archived: Boolean): Flow<List<AlbumEntity>>
+    @Query("SELECT * FROM albums WHERE albumId = :albumId AND pendingDeletion = 0")
+    fun observeAlbum(albumId: String): Flow<AlbumEntity?>
+
+    @Transaction
+    @Query("SELECT * FROM albums WHERE archived = :archived AND pendingDeletion = 0 ORDER BY updatedAt DESC")
+    fun observeSearchableAlbums(archived: Boolean): Flow<List<SearchableAlbum>>
 
     @Query("SELECT COUNT(*) FROM albums WHERE archived = 1 AND pendingDeletion = 0")
     fun observeArchivedCount(): Flow<Int>
@@ -82,6 +75,12 @@ interface LibraryDao {
     @Query("UPDATE chapters SET status=:status, completedPages=:completed, pageCount=:total, pdfStartPage=:startPage WHERE chapterId=:chapterId")
     suspend fun updateChapter(chapterId: String, status: String, completed: Int, total: Int, startPage: Int?)
 
+    @Query("UPDATE chapters SET status=CASE WHEN pageCount != :total THEN 'DOWNLOADING' ELSE status END, pageCount=:total WHERE chapterId=:chapterId")
+    suspend fun updateChapterTotal(chapterId: String, total: Int)
+
+    @Query("DELETE FROM pages WHERE chapterId=:chapterId AND pageIndex > :total")
+    suspend fun trimPages(chapterId: String, total: Int)
+
     @Query("UPDATE albums SET status=:status, completedChapters=:completed, totalChapters=:total, pdfPath=:pdfPath, updatedAt=:now WHERE albumId=:albumId")
     suspend fun updateAlbum(albumId: String, status: String, completed: Int, total: Int, pdfPath: String?, now: Long)
 
@@ -90,6 +89,9 @@ interface LibraryDao {
 
     @Query("UPDATE albums SET lastReadPage=:page, lastReadOffset=:offset, updatedAt=:now WHERE albumId=:albumId")
     suspend fun updateReadPosition(albumId: String, page: Int, offset: Int, now: Long)
+
+    @Query("UPDATE albums SET lastReadPage=:page, lastReadOffset=:offset, lastReadChapterId=:chapterId, lastReadChapterPage=:chapterPage, updatedAt=:now WHERE albumId=:albumId")
+    suspend fun updateReadPosition(albumId: String, page: Int, offset: Int, chapterId: String?, chapterPage: Int, now: Long)
 
     @Query("UPDATE albums SET archived=:archived, updatedAt=:now WHERE albumId=:albumId")
     suspend fun setArchived(albumId: String, archived: Boolean, now: Long)
@@ -108,7 +110,15 @@ interface LibraryDao {
 
     @Transaction
     suspend fun replaceAlbumSnapshot(album: AlbumEntity, chapters: List<ChapterEntity>) {
-        upsertAlbum(album)
+        check(isPendingDeletion(album.albumId) != true) { "作品正在删除" }
+        val current = this.album(album.albumId)
+        upsertAlbum(if (current == null) album else album.copy(
+            lastReadPage = current.lastReadPage,
+            lastReadOffset = current.lastReadOffset,
+            lastReadChapterId = current.lastReadChapterId,
+            lastReadChapterPage = current.lastReadChapterPage,
+            archived = current.archived,
+        ))
         upsertChapters(chapters)
     }
 }

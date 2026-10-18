@@ -1,0 +1,7 @@
+Noto Serif SC, Medium 500 static instance. SIL Open Font License 1.1.
+Copyright 2012 Google Inc. All Rights Reserved.
+Source: https://github.com/google/fonts/tree/8b0a1d0f5983c89bc2b93f1b5fb55f9e252744b5/ofl/notoserifsc
+Original NotoSerifSC[wght].ttf SHA-256: 050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9
+Bundled noto_serif_sc_medium.ttf SHA-256: 6621337559919adcd93105df0294f5436f5f89f33e3d5b2b9df44fdbbcaebc52
+Generated with fontTools 4.67.0 instantiateVariableFont(weight=500); no glyph subsetting.
+License: fonts/NotoSerifSC-OFL.txt

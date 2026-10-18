@@ -1,74 +1,44 @@
-# JMComic Downloader Mobile
+# JMComic Local Library
 
-[简体中文](README.md) · [User guide](UserManual.en.md) · [Security review](SecurityReview.en.md) · [Privacy](PRIVACY.en.md)
+[简体中文](README.md) · [What's new](docs/releases/RELEASE_NOTES.en.md) · [User guide](docs/user/UserManual.en.md)
 
-JMComic Downloader Mobile is a local Android downloader, library, and PDF reader. The complete workflow runs on the phone: online search, image download and descrambling, PDF creation, chapter indexing, and reading. It does not require a PC, NAS, self-hosted server, or cloud relay.
+A small Android app for downloading and reading. Find something you want to read, save it on your phone, and read it later—even offline. You can also export a PDF with chapter bookmarks.
 
-> This project does not host, distribute, or bundle comic content. Content exposed by third-party services may be subject to copyright, age, and regional restrictions. Users are responsible for following applicable law, service terms, and content-owner requirements.
+No PC or server setup needed. Your phone handles it all. Android 8.0 or newer is enough.
 
-## Features
+## What's changed in v1.3.0
 
-- Search by work ID, `JM` number, supported work URL, or keyword, with relevance ranking across title, ID, author, and tags.
-- Run long downloads through WorkManager and show live circular progress on search results.
-- Keep processed images in app-private storage and combine each work into one PDF with chapter bookmarks.
-- Search the local library by title, author, tags, work ID, or chapter name.
-- Swipe a library card left to archive or delete it; reveal the archived section by pulling down again at the top.
-- Show downloads and PDF exports together in Tasks. Removing a task record never removes the work or exported file.
-- Read PDFs with horizontal paging, vertical paging, or continuous scrolling and saved reading position.
-- Tap the page to hide or reveal reading controls; page gestures preserve the current control visibility.
-- Apply per-window brightness, warm eye-comfort overlays, and background colors without changing system settings.
-- Use Android Back and full-screen back gestures to close overlays and navigate to the previous app screen.
+**v1.3.0 is finalized.** This update mainly improves search, the interface, and downloads:
 
-## Privacy and security boundary
+- More accurate search by title, ID, author, or tag, with simplified/traditional Chinese matching where possible.
+- An improved UI.
+- Faster downloads.
+- Improved PDF creation and content export.
 
-The app has no account login, ads, analytics, remote scripts, plugin runtime, WebView, shell access, or dynamic code loading. Its Room database, images, PDFs, and reader preferences stay on the phone, and Android cloud backup is disabled. Network access is required only for online search and new downloads.
+The [release notes](docs/releases/RELEASE_NOTES.en.md) have the details, so we won't go through everything here.
 
-The network client uses a source-maintained HTTPS allowlist, rejects redirects and cleartext traffic, and limits response sizes. Internal paths are derived from validated numeric work and chapter IDs, with canonical-path checks before export and deletion. See [PRIVACY.en.md](PRIVACY.en.md) and [SecurityReview.en.md](SecurityReview.en.md) for details.
+## Installation
 
-| Permission | Purpose |
-| --- | --- |
-| `INTERNET` | Online search and image download |
-| `POST_NOTIFICATIONS` | Background-task progress on Android 13+ |
-| `FOREGROUND_SERVICE` | Keep downloads and exports running |
-| `FOREGROUND_SERVICE_DATA_SYNC` | Declare foreground data-sync work |
+Download the APK from [Releases](https://github.com/Nuancunv/JMComic_downloader_Mobile/releases) and install it on your Android phone.
 
-PDF export uses Android's system document picker and does not require broad storage access.
+Downloads and PDF creation need storage space, so leave some room on your phone.
 
-## Architecture
+## A few other things
 
-| Layer | Technology | Responsibility |
-| --- | --- | --- |
-| UI | Kotlin, Jetpack Compose, Material 3 | Library, search, tasks, details, and reader interactions |
-| State | ViewModel, Kotlin Coroutines, Flow | UI state, searches, and task coordination |
-| Storage | Room | Works, chapters, pages, downloads, and exports |
-| Background work | WorkManager | Resumable downloads, PDF creation, export, and notifications |
-| Network | OkHttp | HTTPS allowlist, response limits, and redirect rejection |
-| PDF | PdfBox-Android, Android PdfRenderer | Creation, bookmarks, validation, and local rendering |
+No ads or usage analytics. Your library, images, and reading progress stay on your phone. It's best to choose the export location yourself. See the [privacy notes](PRIVACY.en.md) for details. This project doesn't supply comic content; search for and download what you need yourself.
 
-The Android protocol flow is independently implemented in Kotlin. The upstream Python runtime is neither bundled nor executed. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
-
-## Requirements and installation
-
-- Android 8.0 (API 26) or later
-- Internet access for search and new downloads
-- Enough local storage for both processed images and PDFs
-
-Download `JMComic_downloader_Mobile-v1.2.0.apk` from [Releases](https://github.com/Nuancunv/JMComic_downloader_Mobile/releases), compare its SHA-256 value with the release notes, and open it on the phone. The first official build may not update an older debug-signed build; export important PDFs before uninstalling a test build. See the [user guide](UserManual.en.md) for complete instructions.
-
-## Build from source
-
-JDK 17, Android SDK Platform 35, and Build Tools 35.0.0 are required.
+To build it yourself, use JDK 17 and Android SDK 35:
 
 ```powershell
 .\gradlew.bat testDebugUnitTest lintDebug assembleDebug
 ```
 
-Release signing is injected through `JMCOMIC_STORE_FILE`, `JMCOMIC_STORE_PASSWORD`, `JMCOMIC_KEY_ALIAS`, and `JMCOMIC_KEY_PASSWORD`. Never commit a keystore or credentials. Without all four variables, `assembleRelease` produces an unsigned build. CI runs tests, lint, and a debug build without release secrets.
+## Disclaimer
 
-## License, attribution, and AI assistance
+JMComic Downloader Mobile is a personal hobby project, intended only for learning and testing.
 
-This project is available under the MIT License and maintained by [@Nuancunv](https://github.com/Nuancunv). Its protocol implementation references [theabab23333/JMComic-Crawler-Python](https://github.com/theabab23333/JMComic-Crawler-Python) and the original [hect0x7/JMComic-Crawler-Python](https://github.com/hect0x7/JMComic-Crawler-Python), both under the MIT License.
+`This project does not host, distribute, or bundle comic content. Content from third-party services may be subject to copyright, age, and regional restrictions. Users should follow applicable local laws, service terms, and content owners' requirements.`
 
-Under human requirements, decisions, and review, OpenAI Codex assisted with architecture, implementation, static review, testing, and documentation. AI is neither a maintainer nor a copyright holder; the project maintainer is responsible for publication and maintenance.
+Maintained by [@Nuancunv](https://github.com/Nuancunv), with Codex helping during development. The protocol references [JMComic-Crawler-Python](https://github.com/hect0x7/JMComic-Crawler-Python); see the [third-party notices](THIRD_PARTY_NOTICES.md) for details. The code is [MIT licensed](LICENSE).
 
-Report reproducible bugs through [GitHub Issues](https://github.com/Nuancunv/JMComic_downloader_Mobile/issues). Follow [SECURITY.md](SECURITY.md) for security reports and avoid posting exploit details or personal data in a public issue.
+Found a problem? => [Open an issue](https://github.com/Nuancunv/JMComic_downloader_Mobile/issues), ideally with the app version and steps to reproduce it.
